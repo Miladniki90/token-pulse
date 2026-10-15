@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Pulse — Live Crypto Dashboard</title>
+<meta name="description" content="Live crypto market dashboard: prices, 24h/7d change, market cap, 7-day sparklines, search and watchlist. Built with vanilla JS and the CoinGecko public API.">
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#131824; --panel2:#1a2132; --line:#252d42;
+    --text:#e6e9f2; --muted:#8b93a7; --up:#22c55e; --down:#ef4444; --accent:#6366f1;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px 16px 48px}
+  header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:20px}
+  h1{font-size:22px;margin:0}
+  h1 span{color:var(--accent)}
+  .sub{color:var(--muted);font-size:13px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:20px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .card .k{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+  .card .v{font-size:22px;font-weight:600;margin-top:4px}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+  input[type=search],select{background:var(--panel);border:1px solid var(--line);color:var(--text);padding:9px 12px;border-radius:8px;font:inherit}
+  input[type=search]{flex:1;min-width:200px}
+  button{background:var(--accent);border:0;color:#fff;padding:9px 14px;border-radius:8px;font:inherit;cursor:pointer}
+  button.ghost{background:var(--panel);border:1px solid var(--line);color:var(--text)}
+  .tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px}
+  table{width:100%;border-collapse:collapse;min-width:720px}
+  th,td{padding:12px 14px;text-align:right;white-space:nowrap}
+  th:nth-child(-n+3),td:nth-child(-n+3){text-align:left}
+  th{color:var(--muted);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.04em;border-bottom:1px solid var(--line);cursor:pointer;user-select:none}
+  tr+tr td{border-top:1px solid var(--line)}
+  tbody tr:hover{background:var(--panel2)}
+  .coin{display:flex;align-items:center;gap:10px}
+  .coin img{width:24px;height:24px;border-radius:50%}
+  .sym{color:var(--muted);font-size:12px;text-transform:uppercase}
+  .up{color:var(--up)} .down{color:var(--down)}
+  .star{cursor:pointer;color:var(--muted);font-size:18px;background:none;border:0;padding:0}
+  .star.on{color:#facc15}
+  svg.spark{width:110px;height:34px}
+  .msg{padding:32px;text-align:center;color:var(--muted)}
+  footer{margin-top:20px;color:var(--muted);font-size:12px;display:flex;flex-wrap:wrap;gap:8px;justify-content:space-between}
+  @media (max-width:560px){h1{font-size:19px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Token <span>Pulse</span></h1>
+      <div class="sub" id="updated">Loading live data…</div>
+    </div>
+    <div class="controls" style="margin:0">
+      <select id="currency" aria-label="Currency">
+        <option value="usd">USD</option>
+        <option value="eur">EUR</option>
+        <option value="btc">BTC</option>
+      </select>
+      <button id="refresh" class="ghost">Refresh</button>
+    </div>
+  </header>
+
+  <section class="stats" id="stats"></section>
+
+  <div class="controls">
+    <input type="search" id="q" placeholder="Search token (e.g. ethereum, sol)…" aria-label="Search tokens">
+    <select id="filter" aria-label="Filter">
+      <option value="all">All tokens</option>
+      <option value="watch">Watchlist only</option>
+      <option value="gainers">Top gainers (24h)</option>
+      <option value="losers">Top losers (24h)</option>
+    </select>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead>
+        <tr>
+          <th data-k="watch" style="width:40px"></th>
+          <th data-k="market_cap_rank">#</th>
+          <th data-k="name">Token</th>
+          <th data-k="current_price">Price</th>
+          <th data-k="price_change_percentage_24h_in_currency">24h</th>
+          <th data-k="price_change_percentage_7d_in_currency">7d</th>
+          <th data-k="market_cap">Market cap</th>
+          <th>Last 7 days</th>
+        </tr>
+      </thead>
+      <tbody id="rows"><tr><td colspan="8" class="msg">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <footer>
+    <span>Data: CoinGecko public API · auto-refreshes every 60s · not financial advice</span>
+    <span>Click a column header to sort</span>
+  </footer>
+</div>
+
+<script>
+const API = "https://api.coingecko.com/api/v3/coins/markets";
+const state = { coins: [], sortKey: "market_cap_rank", sortDir: 1, currency: "usd", timer: null };
+const watch = new Set(safeGet("tp_watch", []));
+
+function safeGet(k, d){ try{ return JSON.parse(localStorage.getItem(k)) ?? d }catch{ return d } }
+function safeSet(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)) }catch{} }
+
+const $ = s => document.querySelector(s);
+const fmtMoney = (n, c) => {
+  if(n == null) return "—";
+  if(c === "btc") return n.toLocaleString("en-US", { maximumSignificantDigits: 6 }) + " ₿";
+  return n.toLocaleString("en-US", { style:"currency", currency:c.toUpperCase(), maximumFractionDigits: n < 1 ? 6 : 2 });
+};
+const fmtBig = (n, c) => {
+  if(n == null) return "—";
+  const sym = c === "usd" ? "$" : c === "eur" ? "€" : "₿";
+  if(n >= 1e12) return sym + (n/1e12).toFixed(2) + "T";
+  if(n >= 1e9)  return sym + (n/1e9).toFixed(2) + "B";
+  if(n >= 1e6)  return sym + (n/1e6).toFixed(2) + "M";
+  return sym + n.toLocaleString("en-US");
+};
+const pct = n => n == null ? "—" : `<span class="${n >= 0 ? "up":"down"}">${n >= 0 ? "▲":"▼"} ${Math.abs(n).toFixed(2)}%</span>`;
+
+function spark(prices, up){
+  if(!prices || !prices.length) return "";
+  const w = 110, h = 34, min = Math.min(...prices), max = Math.max(...prices), r = max - min || 1;
+  const pts = prices.map((p,i) => `${(i/(prices.length-1))*w},${h - ((p-min)/r)*(h-4) - 2}`).join(" ");
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polyline fill="none" stroke="${up ? "var(--up)":"var(--down)"}" stroke-width="1.6" points="${pts}"/></svg>`;
+}
+
+async function load(){
+  const c = state.currency;
+  $("#updated").textContent = "Updating…";
+  try{
+    const url = `${API}?vs_currency=${c}&order=market_cap_desc&per_page=50&page=1&sparkline=true&price_change_percentage=24h,7d`;
+    const res = await fetch(url);
+    if(res.status === 429) throw new Error("Rate limited by the free API — retrying in a minute.");
+    if(!res.ok) throw new Error("API error " + res.status);
+    state.coins = await res.json();
+    $("#updated").textContent = "Updated " + new Date().toLocaleTimeString();
+    render();
+  }catch(e){
+    $("#updated").textContent = "Could not load data";
+    $("#rows").innerHTML = `<tr><td colspan="8" class="msg">${e.message}<br><br><button id="retry">Try again</button></td></tr>`;
+    const b = $("#retry"); if(b) b.onclick = load;
+  }
+}
+
+function renderStats(list){
+  if(!list.length){ $("#stats").innerHTML = ""; return }
+  const c = state.currency;
+  const total = list.reduce((a,x) => a + (x.market_cap||0), 0);
+  const gain = [...list].sort((a,b) => (b.price_change_percentage_24h_in_currency||-1e9) - (a.price_change_percentage_24h_in_currency||-1e9))[0];
+  const lose = [...list].sort((a,b) => (a.price_change_percentage_24h_in_currency||1e9) - (b.price_change_percentage_24h_in_currency||1e9))[0];
+  $("#stats").innerHTML = `
+    <div class="card"><div class="k">Top-50 market cap</div><div class="v">${fmtBig(total,c)}</div></div>
+    <div class="card"><div class="k">Best 24h</div><div class="v">${gain.symbol.toUpperCase()} ${pct(gain.price_change_percentage_24h_in_currency)}</div></div>
+    <div class="card"><div class="k">Worst 24h</div><div class="v">${lose.symbol.toUpperCase()} ${pct(lose.price_change_percentage_24h_in_currency)}</div></div>
+    <div class="card"><div class="k">Watchlist</div><div class="v">${watch.size} token${watch.size === 1 ? "" : "s"}</div></div>`;
+}
+
+function render(){
+  const c = state.currency, q = $("#q").value.trim().toLowerCase(), f = $("#filter").value;
+  renderStats(state.coins);
+  let list = state.coins.filter(x => !q || x.name.toLowerCase().includes(q) || x.symbol.toLowerCase().includes(q) || x.id.includes(q));
+  if(f === "watch") list = list.filter(x => watch.has(x.id));
+  if(f === "gainers") list = list.filter(x => (x.price_change_percentage_24h_in_currency||0) > 0);
+  if(f === "losers") list = list.filter(x => (x.price_change_percentage_24h_in_currency||0) < 0);
+
+  const k = state.sortKey, d = state.sortDir;
+  list.sort((a,b) => {
+    let x, y;
+    if(k === "watch"){ x = watch.has(a.id) ? 0 : 1; y = watch.has(b.id) ? 0 : 1 }
+    else { x = a[k]; y = b[k] }
+    if(x == null) return 1; if(y == null) return -1;
+    if(typeof x === "string") return x.localeCompare(y) * d;
+    return (x - y) * d;
+  });
+  if(f === "gainers") list.sort((a,b) => b.price_change_percentage_24h_in_currency - a.price_change_percentage_24h_in_currency);
+  if(f === "losers") list.sort((a,b) => a.price_change_percentage_24h_in_currency - b.price_change_percentage_24h_in_currency);
+
+  if(!list.length){ $("#rows").innerHTML = `<tr><td colspan="8" class="msg">No tokens match.</td></tr>`; return }
+
+  $("#rows").innerHTML = list.map(x => {
+    const p = x.sparkline_in_7d && x.sparkline_in_7d.price;
+    const up = p ? p[p.length-1] >= p[0] : true;
+    return `<tr>
+      <td><button class="star ${watch.has(x.id) ? "on":""}" data-id="${x.id}" aria-label="Toggle watchlist for ${x.name}">★</button></td>
+      <td>${x.market_cap_rank ?? "—"}</td>
+      <td><div class="coin"><img src="${x.image}" alt="" loading="lazy"><div>${x.name} <span class="sym">${x.symbol}</span></div></div></td>
+      <td>${fmtMoney(x.current_price, c)}</td>
+      <td>${pct(x.price_change_percentage_24h_in_currency)}</td>
+      <td>${pct(x.price_change_percentage_7d_in_currency)}</td>
+      <td>${fmtBig(x.market_cap, c)}</td>
+      <td>${spark(p, up)}</td>
+    </tr>`;
+  }).join("");
+}
+
+$("#rows").addEventListener("click", e => {
+  const b = e.target.closest(".star"); if(!b) return;
+  const id = b.dataset.id;
+  watch.has(id) ? watch.delete(id) : watch.add(id);
+  safeSet("tp_watch", [...watch]);
+  render();
+});
+document.querySelectorAll("th[data-k]").forEach(th => th.addEventListener("click", () => {
+  const k = th.dataset.k;
+  state.sortDir = state.sortKey === k ? -state.sortDir : (k === "name" || k === "market_cap_rank" ? 1 : -1);
+  state.sortKey = k; render();
+}));
+$("#q").addEventListener("input", render);
+$("#filter").addEventListener("change", render);
+$("#currency").addEventListener("change", e => { state.currency = e.target.value; load() });
+$("#refresh").addEventListener("click", load);
+
+load();
+state.timer = setInterval(load, 60000);
+</script>
+</body>
+</html>
